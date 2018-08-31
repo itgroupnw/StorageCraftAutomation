@@ -1,0 +1,151 @@
+<#
+.SYNOPSIS
+    This function will download and install the patch stcvsm.sys driver for ShadowProtect
+.DESCRIPTION
+    This function will download and install the patched stcvsm.sys driver for ShadowProtect SPX
+    version 6.7.X. Although this contains some basic checks for the correct SPX and driver versions
+    it would be best to utilize the Check-Stcvsm67xDriver function to perform a read only approach
+    prior.
+.PARAMETER Computer
+    This is currently not used. Future support for pipeline/remote execution planned
+.PARAMETER DriverLocation
+    Specify a direct download linke or UNC path to your own driver. If one is not specified the
+    function will download the one attached to this repository. The one in the repository was provided
+    to me by StorageCraft support.
+.EXAMPLE
+    PS C:\Windows\system32> Install-Stcvsm67XDriver
+
+    ComputerName InstallSuccessful SPXVersion StcvsmVersion
+    ------------ ----------------- ---------- -------------
+    FILESRV01    True             6.7.4      2.2.73.0.36
+
+.NOTES
+    Version:        1.0
+    Author:         Lucas
+    Creation Date:  08/30/2018
+#>
+Function Install-Stcvsm67XDriver {
+#Region - Parameters
+    [CmdletBinding()]
+    Param (
+        [parameter(Mandatory = $false,
+            ValueFromPipeline = $false,
+            Position = 0)]
+        [String[]]$ComputerName = $env:computername,
+        [parameter(Mandatory = $false,
+            ValueFromPipeline = $false,
+            Position = 1)]
+        [String]$DriverLocation 
+    )
+#EndRegion - Parameters
+#Region - Begin Block
+    Begin {
+        $ALLInstallResults = @()
+    }
+#EndRegion - Begin Block
+#Region - Process Block
+    Process {
+        $NewStcvsmDriver = $null
+        $RevertToOld = $null
+        $Successful = $false
+        $DriverPath = "$env:systemroot\system32\drivers"
+        #Built in version check
+        $SPXVersion = (Get-ChildItem -Path HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall, HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall | Get-ItemProperty | Where-Object {$_.DisplayName -like 'StorageCraft ShadowProtect SPX' } | Select-Object -ExpandProperty DisplayVersion)
+        if ($SPXVersion -like '6.7.*') {
+            $CurrentDriverVersion = (Get-ItemProperty "$driverpath\stcvsm.sys" | Select-Object -ExpandProperty versioninfo).productversion
+            if ($CurrentDriverVersion -eq '2.2.73.0.36' ) {
+                Write-Verbose 'stcvsm.sys driver version 2.2.73.0.36 already present'
+            } else {
+                # BEGIN - Download and Extract Driver
+                Try {
+                    [Net.ServicePointManager]::SecurityProtocol = "tls12, tls11, tls"
+                    $StcvsmFolder = ("$env:SystemRoot\temp\MSFT Signed - stcvsm-2.2.73.0.36")
+                    $StcvsmZIP = $StcvsmFolder + ".zip"
+                    if (test-path $StcvsmFolder) {
+                        Remove-Item -Path "$StcvsmFolder" -Recurse -Force
+                    }
+                    if (test-path "$StcvsmZIP") {
+                        Remove-Item -Path "$StcvsmZIP" -Recurse -Force
+                    }
+                    (New-Object System.Net.WebClient).DownloadFile("$DriverLocation", "$StcvsmZIP")
+                    Unblock-File -Path "$StcvsmZIP"
+                    Add-Type -assembly "system.io.compression.filesystem"
+                    [io.compression.zipfile]::ExtractToDirectory("$StcvsmZIP", "$StcvsmFolder")
+                } Catch {
+                    Write-Verbose -Message 'Driver failed to download and extract.' 
+                }
+                # END - Download and Extract Driver
+                # BEGIN - Determine Driver Architecture Needed
+                If (Test-path $StcvsmFolder) {
+                    $OSArchitecture = Get-WmiObject win32_operatingsystem | Select-Object -expandproperty osarchitecture
+                    If ($OSArchitecture -eq '64-bit') {
+                        $NewStcvsmDriver = "$StcvsmFolder\x64\stcvsm.sys"
+                    } elseif ($OSArchitecture -eq '32-bit') {
+                        $NewstcvsmDriver = "$StcvsmFolder\x86\stcvsm.sys"
+                    } Else {
+                        Write-Verbose -message 'Unable to determine OS architecture.'
+                        $NewStcvsmDriver = 'Unknown'
+                    }
+                }
+                # END - Determine Driver Architecture Needed
+                # BEGIN - Validate Driver Download
+                If ($NewStcvsmDriver -Match 'stcvsm.sys') {
+                    $DownloadedDriverVersion = (Get-ItemProperty "$NewStcvsmDriver" | Select-Object -ExpandProperty versioninfo).productversion
+                    If ($DownloadedDriverVersion -ne '2.2.73.0.36') {
+                        Write-Verbose -Message 'The downloaded driver is not stcvsm.sys 2.2.73.0.36'
+                    } else {
+                        $AttemptInstall = $true
+                    }
+                    # END - Validate Driver Download
+                    # BEGIN - Install Driver
+                    Try {
+                        Rename-Item -Path "$DriverPath\stcvsm.sys" -NewName 'stcvsm-rtm.sys'
+                    } Catch {
+                        Write-Verbose -Message 'Unable to remove current stcvsm driver.'
+                    }
+                    If (Test-Path "$DriverPath\stcvsm-rtm.sys") {
+                        Try {
+                            Move-Item -Path "$NewStcvsmDriver" -Destination "$DriverPath\stcvsm.sys"
+                        } Catch {
+                            Write-Verbose -Message 'Unable to move new stcvsm into driver store.'
+                            $RevertToOld = $true
+                        } 
+                    }
+                    If ($RevertToOld -eq $true) {
+                        Try {
+                            Rename-Item -Path "$DriverPath\stcvsm-rtm.sys" -NewName 'stcvsm.sys'
+                        } Catch {
+                            Write-Verbose -Message 'New driver install failed. Unable to revert to old driver.'
+                        }
+                    }
+                }
+                # End - Install Driver
+                $CurrentDriverVersion = (Get-ItemProperty "$driverpath\stcvsm.sys" | Select-Object -ExpandProperty versioninfo).productversion
+                if ($CurrentDriverVersion -eq '2.2.73.0.36' ) {
+                    $Successful = $true
+                }
+            }
+        } Else {
+            Write-Verbose 'ShadowProtect SPX Version 6.7.X is not present.'
+        }
+        $CurrentDriverVersion = (Get-ItemProperty "$driverpath\stcvsm.sys" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty versioninfo).productversion
+        $Item = New-Object PSObject
+        $Item | Add-Member -type NoteProperty -Name 'ComputerName' -Value $($ComputerName)
+        $Item | Add-Member -type NoteProperty -Name 'InstallSuccessful' -Value $Successful
+        $Item | Add-Member -type NoteProperty -Name 'SPXVersion' -Value $SPXVersion
+        $Item | Add-Member -Type NoteProperty -Name 'StcvsmVersion' -Value $CurrentDriverVersion
+        $AllInstallResults += $Item
+    }
+#EndRegion - Process Block
+#Region - End Block
+    End {
+        $TableProperties = @(
+            @{ Label = 'ComputerName'; Expression = { $_.ComputerName }; Alignment = 'Left' }
+            @{ Label = 'InstallSuccessful'; Expression = { $_.InstallSuccessful }; Alignment = 'Left' }
+            @{ Label = 'SPXVersion'; Expression = { $_.SPXVersion }; Alignment = 'Left' }
+            @{ Label = 'StcvsmVersion'; Expression = { $_.StcvsmVersion }; Alignment = 'Left' }
+        )
+        $AllInstallResults | Format-Table -Property $TableProperties -AutoSize
+    }
+#EndRegion - End Block
+}
